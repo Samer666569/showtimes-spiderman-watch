@@ -1,1 +1,1 @@
-# “I’m both!” - Spidey
+“I’m both!” - Spidey
