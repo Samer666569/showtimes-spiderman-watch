@@ -1,0 +1,102 @@
+name: Watch ShowTimes Spider-Man 8/7
+
+on:
+  workflow_dispatch:
+    inputs:
+      send_test_email:
+        description: "Send a Gmail test email without stopping the watcher"
+        required: false
+        type: boolean
+        default: false
+
+  schedule:
+    # 每 5 分鐘一次，刻意避開整點。
+    - cron: "2-59/5 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: showtimes-spiderman-2026-08-07
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check initialization and notification state
+        id: state
+        shell: bash
+        run: |
+          if [ -f notification-sent.json ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Already notified. Nothing to do."
+            exit 0
+          fi
+
+          if [ ! -f baseline-event-ids.json ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Run the Initialize ShowTimes baseline workflow first."
+            exit 0
+          fi
+
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Compare current event ID keys with baseline
+        if: steps.state.outputs.ready == 'true'
+        id: watcher
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
+          FORCE_TEST_EMAIL: >-
+            ${{ github.event_name == 'workflow_dispatch'
+                && inputs.send_test_email
+                && 'true'
+                || 'false' }}
+        run: python monitor.py
+
+      - name: Save permanent notification marker
+        if: >-
+          steps.state.outputs.ready == 'true' &&
+          steps.watcher.outputs.triggered == 'true' &&
+          steps.watcher.outputs.email_sent == 'true' &&
+          steps.watcher.outputs.test_email != 'true'
+        env:
+          NEW_IDS_COUNT: ${{ steps.watcher.outputs.new_ids_count }}
+          NEW_IDS: ${{ steps.watcher.outputs.new_ids }}
+          TARGET_HITS: ${{ steps.watcher.outputs.target_hits }}
+          BASELINE_MAX: ${{ steps.watcher.outputs.baseline_max_event_id }}
+          CURRENT_MAX: ${{ steps.watcher.outputs.current_max_event_id }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+
+          marker = {
+              "notified_at_utc": datetime.now(timezone.utc).isoformat(),
+              "new_ids_count": int(os.environ["NEW_IDS_COUNT"]),
+              "new_ids_preview": os.environ["NEW_IDS"],
+              "target_hits": os.environ["TARGET_HITS"],
+              "baseline_max_event_id": int(os.environ["BASELINE_MAX"]),
+              "current_max_event_id": int(os.environ["CURRENT_MAX"]),
+          }
+
+          with open("notification-sent.json", "w", encoding="utf-8") as file:
+              json.dump(marker, file, ensure_ascii=False, indent=2)
+              file.write("\n")
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add notification-sent.json
+          git commit -m "Record ShowTimes notification"
+          git push
